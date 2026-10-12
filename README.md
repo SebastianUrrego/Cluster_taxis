@@ -114,6 +114,15 @@ de 16.68, frente a un máximo de 1439.72: la dispersión no refleja variabilidad
 tráfico sino un conjunto reducido de registros con el taxímetro mal cerrado. Para este
 caso la mediana describe mejor el comportamiento típico que el promedio.
 
+### Evidencias
+<img width="1907" height="910" alt="image" src="https://github.com/user-attachments/assets/bd655d6e-6d63-4a19-8f76-b963ff13676d" />
+
+<img width="1892" height="911" alt="image" src="https://github.com/user-attachments/assets/f2433946-a074-4f49-a6e0-e14e31f5e2af" />
+
+<img width="1871" height="876" alt="image" src="https://github.com/user-attachments/assets/c2b6a4ad-a053-4082-8a48-0630079a68f5" />
+
+<img width="1912" height="917" alt="image" src="https://github.com/user-attachments/assets/294f539e-b73a-45f8-84cd-5810b05d3dca" />
+
 ## Optimizaciones aplicadas
 
 - **Broadcast join**: la tabla de zonas (265 filas) se envía a cada nodo en lugar de
