@@ -1,12 +1,12 @@
 """
 Taller Taxis NYC - PySpark en AWS EMR
-Programa python-spark (punto 14). Ejecutar en el nodo master del cluster con:
+Punto 14: versión ejecutable del notebook.
 
-    spark-submit taxis_nyc.py --bucket NOMBRE_DE_TU_BUCKET
+Ejecutar en el nodo principal del clúster:
 
-Cada bloque "PUNTO N" se puede copiar tal cual a una celda de un notebook
-(EMR Studio / JupyterHub). En el notebook la variable `spark` ya existe, así que
-basta con definir B = "s3://NOMBRE_DE_TU_BUCKET" y pegar los bloques.
+    spark-submit taxis_nyc.py --bucket taxis-gotys
+
+Reproduce los puntos 2 al 12 del taller en el mismo orden que el notebook.
 """
 import argparse
 
@@ -25,7 +25,8 @@ def main():
 
     spark = (
         SparkSession.builder.appName("TallerTaxisNYC")
-        # UTC para que year/month/unix_timestamp no se vean afectados por zonas horarias
+        # UTC: las marcas de tiempo son timestamp_ntz, se fija la zona para que
+        # unix_timestamp no aplique conversiones
         .config("spark.sql.session.timeZone", "UTC")
         .getOrCreate()
     )
@@ -33,17 +34,18 @@ def main():
     # ------------------------------------------------------------------
     # PUNTO 2: cargar viajes y zonas en dos dataframes
     # ------------------------------------------------------------------
-    viajes = spark.read.parquet(f"{B}/taxis/viajes/").select(
-        "tpep_pickup_datetime", "tpep_dropoff_datetime", "PULocationID", "DOLocationID"
-    )
+    viajes = spark.read.parquet(f"{B}/taxis/viajes/")
     zonas = spark.read.csv(f"{B}/taxis/zonas/", header=True, inferSchema=True)
 
     viajes.printSchema()
     zonas.show(5, truncate=False)
-    print("Total de viajes:", viajes.count())
+    print("Viajes:", viajes.count())
+    print("Zonas:", zonas.count())
 
     # ------------------------------------------------------------------
     # PUNTO 3: join para obtener el lugar de recogida (alias PU_ZONE)
+    # broadcast: la tabla de zonas (265 filas) se envia a cada nodo en lugar
+    # de redistribuir los 102 millones de viajes por la red
     # ------------------------------------------------------------------
     zonas_pu = zonas.select(
         F.col("LocationID").alias("PU_ID"), F.col("Zone").alias("PU_ZONE")
@@ -52,8 +54,8 @@ def main():
         F.broadcast(zonas_pu), viajes.PULocationID == zonas_pu.PU_ID
     ).select(
         "PU_ZONE",
-        F.col("tpep_pickup_datetime").cast("timestamp").alias("hora_recogida"),
-        F.col("tpep_dropoff_datetime").cast("timestamp").alias("hora_dejada"),
+        F.col("tpep_pickup_datetime").alias("hora_recogida"),
+        F.col("tpep_dropoff_datetime").alias("hora_dejada"),
         "DOLocationID",
     )
     consulta1.show(10, truncate=False)
@@ -86,10 +88,15 @@ def main():
     df.cache()
     df.show(10, truncate=False)
 
-    # Datos "limpios": se usan donde el taller pide excluir datos erróneos.
-    # - viajes que empiezan en 2018 (el dataset trae fechas como 2001, 2009, 2088)
-    # - duración positiva y de máximo 24 horas
-    # - zonas conocidas (sin nulos, "NV", "Unknown", etc.)
+    # ------------------------------------------------------------------
+    # PUNTO 6: el viaje que mas ha durado
+    # ------------------------------------------------------------------
+    print("Viaje mas largo (datos crudos):")
+    df.orderBy(F.desc("trip_duration")).show(1, truncate=False)
+
+    # Datos limpios: se excluyen fechas fuera de 2018 (el dataset trae 2001,
+    # 2009, 2088), duraciones negativas o mayores a 24 horas, y zonas sin
+    # identificar. Se usa en los puntos 6, 7 y 8.
     limpio = df.filter(
         (F.year("PU_datetime") == 2018)
         & (F.col("trip_duration") > 0)
@@ -99,25 +106,19 @@ def main():
         & ~F.col("PU_ZONE").isin(ZONAS_INVALIDAS)
         & ~F.col("DO_ZONE").isin(ZONAS_INVALIDAS)
     )
+    limpio.cache()
 
-    # ------------------------------------------------------------------
-    # PUNTO 6: el viaje que más ha durado
-    # ------------------------------------------------------------------
-    print("Viaje más largo (datos crudos, suele ser un error de registro):")
-    df.orderBy(F.desc("trip_duration")).show(1, truncate=False)
-
-    print("Viaje más largo (datos limpios):")
+    print("Viaje mas largo (datos limpios):")
     limpio.orderBy(F.desc("trip_duration")).show(1, truncate=False)
 
     # ------------------------------------------------------------------
-    # PUNTO 7: destino más frecuente (excluyendo datos erróneos)
+    # PUNTO 7: destino mas frecuente (excluyendo datos erroneos)
     # ------------------------------------------------------------------
-    destinos = limpio.groupBy("DO_ZONE").count().orderBy(F.desc("count"))
-    print("Destino más frecuente:")
-    destinos.show(5, truncate=False)
+    print("Destinos mas frecuentes:")
+    limpio.groupBy("DO_ZONE").count().orderBy(F.desc("count")).show(10, truncate=False)
 
     # ------------------------------------------------------------------
-    # PUNTO 8: viaje más frecuente (origen-destino), promedio y desviación estándar
+    # PUNTO 8: viaje mas frecuente (origen-destino), promedio y desviacion
     # ------------------------------------------------------------------
     rutas = (
         limpio.groupBy("PU_ZONE", "DO_ZONE")
@@ -128,12 +129,29 @@ def main():
         )
         .orderBy(F.desc("num_viajes"))
     )
-    print("Viaje (origen-destino) más frecuente:")
-    rutas.show(5, truncate=False)
+    print("Rutas mas frecuentes:")
+    rutas.show(10, truncate=False)
 
-    # Opcional: excluyendo viajes dentro de la misma zona
-    print("Más frecuente con origen distinto al destino:")
-    rutas.filter(F.col("PU_ZONE") != F.col("DO_ZONE")).show(5, truncate=False)
+    print("Ruta mas frecuente con origen distinto al destino:")
+    rutas.filter(F.col("PU_ZONE") != F.col("DO_ZONE")).show(10, truncate=False)
+
+    # Percentiles de la ruta mas frecuente: la desviacion estandar (49.55 min)
+    # es seis veces el promedio (8.03 min). Comparar mediana y p99 contra el
+    # maximo muestra que la dispersion viene de registros con el taximetro mal
+    # cerrado, no de variabilidad real del trafico.
+    ruta_top = limpio.filter(
+        (F.col("PU_ZONE") == "Upper East Side South")
+        & (F.col("DO_ZONE") == "Upper East Side North")
+    )
+    print("Distribucion de la ruta mas frecuente:")
+    ruta_top.select(
+        F.count("*").alias("n"),
+        F.round(F.avg("trip_duration"), 2).alias("promedio"),
+        F.round(F.stddev("trip_duration"), 2).alias("desviacion"),
+        F.round(F.expr("percentile_approx(trip_duration, 0.5)"), 2).alias("mediana"),
+        F.round(F.expr("percentile_approx(trip_duration, 0.99)"), 2).alias("p99"),
+        F.round(F.max("trip_duration"), 2).alias("maximo"),
+    ).show()
 
     # ------------------------------------------------------------------
     # PUNTOS 9 y 10: columnas enteras year y month del inicio del viaje
@@ -142,10 +160,12 @@ def main():
         "month", F.month("PU_datetime").cast("int")
     )
     df.printSchema()
+    df.select("PU_datetime", "year", "month").show(5)
 
     # ------------------------------------------------------------------
-    # PUNTO 11: meses con número de viajes, de mayor a menor
+    # PUNTO 11: meses con numero de viajes, de mayor a menor
     # ------------------------------------------------------------------
+    print("Meses por numero de viajes:")
     (
         df.filter(F.col("year") == 2018)
         .groupBy("year", "month")
@@ -158,18 +178,18 @@ def main():
     # ------------------------------------------------------------------
     # PUNTO 12: guardar en parquet particionado por year y month
     # Resultado: s3://bucket/viajes/year=2018/month=1 ... month=12
-    # Se guardan solo viajes de 2018 para no crear particiones basura (year=2088, etc.)
+    # Se filtra a 2018 para no crear particiones basura (year=2088, etc.)
     # ------------------------------------------------------------------
     (
         df.filter(F.col("year") == 2018)
         .select("PU_ZONE", "DO_ZONE", "PU_datetime", "DO_datetime",
                 "trip_duration", "year", "month")
-        .repartition("year", "month")  # un archivo por partición
+        .repartition("year", "month")
         .write.mode("overwrite")
         .partitionBy("year", "month")
         .parquet(f"{B}/viajes/")
     )
-    print(f"Datos guardados en {B}/viajes/")
+    print("Guardado en", f"{B}/viajes/")
 
     spark.stop()
 
